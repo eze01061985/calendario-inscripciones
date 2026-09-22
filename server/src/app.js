@@ -4,8 +4,8 @@ import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { HttpError, validName, validDate, validMonth } from './validation.js';
-import { listMonth, createBooking, updateBooking } from './db.js';
+import { HttpError, validName, validActiveDate, validMonth } from './validation.js';
+import { listMonth, createBooking, updateBooking, blockDay } from './db.js';
 
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 const idOf = value => {
@@ -37,10 +37,14 @@ export function createApp({ pool, passwordHash, sessionSecret, production = fals
   app.get('/api/health', asyncRoute(async (_req, res) => { await pool.query('SELECT 1'); res.json({ status: 'ok' }); }));
   app.get('/api/inscripciones', asyncRoute(async (req, res) => {
     const { year, month } = validMonth(req.query.year, req.query.month);
+    const now = today();
+    const current = now.getFullYear() * 12 + now.getMonth();
+    const requested = year * 12 + month - 1;
+    if (requested < current || requested > current + 1) throw new HttpError(400, 'Solo están disponibles el mes actual y el siguiente.');
     res.json(await listMonth(pool, year, month));
   }));
   app.post('/api/inscripciones', sameOrigin, limited(20), asyncRoute(async (req, res) => {
-    const fecha = validDate(req.body?.fecha, { today: today() });
+    const fecha = validActiveDate(req.body?.fecha, { today: today() });
     const nombre = validName(req.body?.nombre);
     res.status(201).json(await createBooking(pool, fecha, nombre));
   }));
@@ -54,20 +58,33 @@ export function createApp({ pool, passwordHash, sessionSecret, production = fals
   app.post('/api/admin/logout', sameOrigin, requireAdmin, (_req, res) => { res.clearCookie('admin_session', cookie); res.json({ authenticated: false }); });
   app.use('/api/admin/inscripciones', sameOrigin, requireAdmin);
   app.get('/api/admin/inscripciones', asyncRoute(async (_req, res) => {
-    const [rows] = await pool.execute('SELECT id, fecha, nombre, creado_en, actualizado_en FROM inscripciones ORDER BY fecha DESC');
+    const [rows] = await pool.execute('SELECT id, fecha, nombre, creado_en, actualizado_en FROM inscripciones WHERE bloqueado = 0 ORDER BY fecha DESC');
     res.json(rows);
   }));
   app.post('/api/admin/inscripciones', asyncRoute(async (req, res) => {
-    res.status(201).json(await createBooking(pool, validDate(req.body?.fecha, { allowPast: true }), validName(req.body?.nombre)));
+    res.status(201).json(await createBooking(pool, validActiveDate(req.body?.fecha, { today: today() }), validName(req.body?.nombre)));
   }));
   app.patch('/api/admin/inscripciones/:id', asyncRoute(async (req, res) => {
-    const updated = await updateBooking(pool, idOf(req.params.id), validDate(req.body?.fecha, { allowPast: true }), validName(req.body?.nombre));
+    const updated = await updateBooking(pool, idOf(req.params.id), validActiveDate(req.body?.fecha, { today: today() }), validName(req.body?.nombre));
     if (!updated) throw new HttpError(404, 'Inscripción no encontrada.');
     res.json(updated);
   }));
   app.delete('/api/admin/inscripciones/:id', asyncRoute(async (req, res) => {
-    const [result] = await pool.execute('DELETE FROM inscripciones WHERE id = ?', [idOf(req.params.id)]);
+    const [result] = await pool.execute('DELETE FROM inscripciones WHERE id = ? AND bloqueado = 0', [idOf(req.params.id)]);
     if (!result.affectedRows) throw new HttpError(404, 'Inscripción no encontrada.');
+    res.status(204).end();
+  }));
+  app.use('/api/admin/bloqueos', sameOrigin, requireAdmin);
+  app.get('/api/admin/bloqueos', asyncRoute(async (_req, res) => {
+    const [rows] = await pool.execute('SELECT id, fecha FROM inscripciones WHERE bloqueado = 1 ORDER BY fecha');
+    res.json(rows);
+  }));
+  app.post('/api/admin/bloqueos', asyncRoute(async (req, res) => {
+    res.status(201).json(await blockDay(pool, validActiveDate(req.body?.fecha, { today: today() })));
+  }));
+  app.delete('/api/admin/bloqueos/:id', asyncRoute(async (req, res) => {
+    const [result] = await pool.execute('DELETE FROM inscripciones WHERE id = ? AND bloqueado = 1', [idOf(req.params.id)]);
+    if (!result.affectedRows) throw new HttpError(404, 'Bloqueo no encontrado.');
     res.status(204).end();
   }));
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Ruta no encontrada.')));
