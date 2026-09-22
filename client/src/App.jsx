@@ -70,7 +70,7 @@ function PublicPage() {
     {error && !selected && <div className="notice error" role="alert">{error} <button type="button" onClick={() => { setError(''); refresh(true); }}>Reintentar</button></div>}
     {loading ? <p className="loading" role="status">Cargando calendario…</p> : <Calendar month={month} bookings={bookings} onSelect={date => { setSelected(date); setError(''); setNotice(''); }} />}
     <p className="instruction">Para anotarte, tocá un casillero blanco.<br/>Si necesitás modificar o cancelar una fecha, comunicate con el administrador.</p>
-    {selected && <Dialog title={`Anotarse para el ${longDate(selected)}`} onClose={() => { setSelected(null); setError(''); }}><form onSubmit={submit}><label htmlFor="booking-name">Nombre o familia</label><input id="booking-name" autoFocus required minLength={2} maxLength={100} value={name} onChange={e => setName(e.target.value)} placeholder="Ej.: Familia Flores"/>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={submitting || name.trim().length < 2}>{submitting ? 'Anotando…' : 'Anotarme'}</button></form></Dialog>}
+    {selected && <Dialog title={`Anotarse para el ${longDate(selected)}`} onClose={() => { setSelected(null); setError(''); }}><form onSubmit={submit}><label htmlFor="booking-name">Nombre o familia</label><input id="booking-name" autoFocus required minLength={2} maxLength={100} value={name} onChange={e => setName(e.target.value)}/>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={submitting || name.trim().length < 2}>{submitting ? 'Anotando…' : 'Anotarme'}</button></form></Dialog>}
   </main>;
 }
 
