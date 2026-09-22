@@ -56,10 +56,10 @@ Variables: `DATABASE_URL` (URL de conexión MySQL), `ADMIN_PASSWORD_HASH` (bcryp
 
 Crear un proyecto con un servicio MySQL y un servicio desde este repositorio. En el servicio web, usar `npm install` para build, `npm run build` como comando de build y `npm start` como comando de inicio; configurar las variables anteriores. `DATABASE_URL` debe referenciar la URL privada del servicio MySQL de Railway. Asignar un dominio público al servicio web y verificar `/api/health`. El esquema se crea automáticamente al arrancar, sin pasos manuales irreproducibles. Si se cambia el esquema en el futuro, agregar una migración versionada y un ejecutor que registre cuáles se aplicaron.
 
-Demo: pendiente de publicar. No se incluye una URL sin verificarla.
+Demo en producción: [calendario-inscripciones-production.up.railway.app](https://calendario-inscripciones-production.up.railway.app/). La administración está en [`/admin`](https://calendario-inscripciones-production.up.railway.app/admin).
 
 ## Pruebas y decisiones
 
-`npm test` cubre validaciones, creación, conflicto, mismo nombre en otra fecha, sesión, autorización, edición, movimiento, eliminación y dos envíos simultáneos a la API. `npm run build` comprueba el frontend. Los tests usan un adaptador de base en memoria para ejercitar la API; un smoke test contra MySQL y la URL pública debe acompañar cada despliegue real. El índice UNIQUE de la migración, no el adaptador de tests ni una comprobación previa en React, garantiza la regla en producción.
+`npm test` cubre validaciones, creación, conflicto, mismo nombre en otra fecha, sesión, autorización, edición, movimiento, eliminación y dos envíos simultáneos a la API. `npm run build` comprueba el frontend. Los tests usan un adaptador de base en memoria para ejercitar la API. En el despliegue inicial también se comprobó la URL pública contra MySQL real: salud, alta pública, conflicto, rechazo de fecha pasada, acceso administrativo, alta, edición, movimiento y eliminación. Las inscripciones temporales de esa prueba se retiraron. El índice UNIQUE de la migración, no el adaptador de tests ni una comprobación previa en React, garantiza la regla en producción.
 
 La interfaz evita controles innecesarios y conserva el calendario como superficie principal. Los días pasados no se pueden elegir en público. Las inscripciones no son secretas: cualquier visitante puede ver el nombre, tal como en el calendario físico. Por eso conviene compartir el enlace solo con el grupo previsto y no poner datos sensibles en el nombre.
