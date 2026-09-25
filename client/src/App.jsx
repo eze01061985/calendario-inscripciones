@@ -4,7 +4,8 @@ const weekdays = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
 const longDate = value => new Intl.DateTimeFormat('es', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${value}T12:00:00Z`));
 const isoDate = (year, month, day) => `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 const localToday = () => { const d = new Date(); return isoDate(d.getFullYear(), d.getMonth(), d.getDate()); };
-const activeRange = () => { const now = new Date(); return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(now.getFullYear(), now.getMonth() + 2, 0) }; };
+const monthValue = month => isoDate(month.getFullYear(), month.getMonth(), 1).slice(0, 7);
+const calendarMonth = data => new Date(data.year, data.month - 1, 1);
 const monthTitle = d => { const label = new Intl.DateTimeFormat('es', { month: 'long', year: 'numeric' }).format(d); return label.charAt(0).toUpperCase() + label.slice(1); };
 const api = async (path, options = {}) => {
   const response = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options });
@@ -35,9 +36,7 @@ function Calendar({ month, bookings, onSelect, onOccupied, onBlocked, admin }) {
 function MonthNavigation({ month, setMonth }) {
   const move = n => setMonth(d => new Date(d.getFullYear(), d.getMonth() + n, 1));
   const now = new Date();
-  const { start } = activeRange();
-  const next = new Date(start.getFullYear(), start.getMonth() + 1, 1);
-  return <div className="month-nav"><button type="button" className="nav-arrow" disabled={month <= start} onClick={() => move(-1)} aria-label="Mes anterior">‹</button><div className="month-heading"><h1 style={{ textTransform: 'none' }}>{monthTitle(month)}</h1>{month > start && <button type="button" className="today-link" onClick={() => setMonth(new Date(now.getFullYear(), now.getMonth(), 1))}>Volver a hoy</button>}</div><button type="button" className="nav-arrow" disabled={month >= next} onClick={() => move(1)} aria-label="Mes siguiente">›</button></div>;
+  return <div className="month-nav"><button type="button" className="nav-arrow" disabled={month <= new Date(1900, 0, 1)} onClick={() => move(-1)} aria-label="Mes anterior">‹</button><div className="month-heading"><h1 style={{ textTransform: 'none' }}>{monthTitle(month)}</h1><button type="button" className="today-link" onClick={() => setMonth(new Date(now.getFullYear(), now.getMonth(), 1))}>Volver a hoy</button></div><button type="button" className="nav-arrow" disabled={month >= new Date(2100, 11, 1)} onClick={() => move(1)} aria-label="Mes siguiente">›</button></div>;
 }
 
 function Dialog({ title, children, onClose }) {
@@ -47,51 +46,70 @@ function Dialog({ title, children, onClose }) {
 }
 
 function PublicPage() {
-  const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+  const [month, setMonth] = useState(null);
   const [bookings, setBookings] = useState([]), [loading, setLoading] = useState(true), [error, setError] = useState('');
   const [selected, setSelected] = useState(null), [name, setName] = useState(''), [submitting, setSubmitting] = useState(false), [notice, setNotice] = useState('');
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
-    try { setBookings(await api(`/api/inscripciones?year=${month.getFullYear()}&month=${month.getMonth() + 1}`)); setError(''); }
+    try {
+      const data = await api('/api/calendario');
+      const nextMonth = calendarMonth(data);
+      setMonth(previous => previous?.getTime() === nextMonth.getTime() ? previous : nextMonth);
+      setBookings(data.inscripciones); setError('');
+    }
     catch (e) { setError(e.message); }
     finally { if (showLoading) setLoading(false); }
-  }, [month]);
+  }, []);
   useEffect(() => { refresh(true); const timer = setInterval(() => refresh(), 60000); return () => clearInterval(timer); }, [refresh]);
+  useEffect(() => { setSelected(null); setName(''); setNotice(''); }, [month]);
   const submit = async e => {
     e.preventDefault(); setSubmitting(true); setError('');
     try {
-      const current = await api(`/api/inscripciones?year=${month.getFullYear()}&month=${month.getMonth() + 1}`);
-      setBookings(current);
-      if (current.some(item => item.fecha === selected)) throw Object.assign(new Error('Ese día acaba de quedar ocupado o bloqueado. Elegí otro día disponible.'), { status: 409 });
+      const current = await api('/api/calendario');
+      if (selected.slice(0, 7) !== monthValue(calendarMonth(current))) throw Object.assign(new Error('El administrador cambió el mes disponible. Revisá el calendario e intentá nuevamente.'), { status: 400 });
+      setBookings(current.inscripciones);
+      if (current.inscripciones.some(item => item.fecha === selected)) throw Object.assign(new Error('Ese día acaba de quedar ocupado o bloqueado. Elegí otro día disponible.'), { status: 409 });
       const booking = await api('/api/inscripciones', { method: 'POST', body: JSON.stringify({ fecha: selected, nombre: name }) });
       setBookings(items => [...items, booking]); setNotice(`✓ Listo. ${booking.nombre} quedó anotado/a para el ${longDate(selected)}.`); setSelected(null); setName('');
-    } catch (e) { setError(e.message); if (e.status === 409) { setSelected(null); await refresh(); } }
+    } catch (e) { if (e.status === 400 || e.status === 409) { setSelected(null); await refresh(); } setError(e.message); }
     finally { setSubmitting(false); }
   };
-  return <main className="shell"><header className="topline"><div className="brand"><span className="brand-mark" aria-hidden="true">▦</span> Calendario compartido</div></header><MonthNavigation month={month} setMonth={setMonth}/>
+  return <main className="shell"><header className="topline"><div className="brand"><span className="brand-mark" aria-hidden="true">▦</span> Calendario compartido</div></header>{month && <div className="month-nav public-month"><div className="month-heading"><h1>{monthTitle(month)}</h1></div></div>}
     {notice && <div className="notice success" role="status">{notice}<button type="button" onClick={() => setNotice('')} aria-label="Cerrar aviso">×</button></div>}
     {error && !selected && <div className="notice error" role="alert">{error} <button type="button" onClick={() => { setError(''); refresh(true); }}>Reintentar</button></div>}
-    {loading ? <p className="loading" role="status">Cargando calendario…</p> : <Calendar month={month} bookings={bookings} onSelect={date => { setSelected(date); setError(''); setNotice(''); }} />}
+    {loading ? <p className="loading" role="status">Cargando calendario…</p> : month && <Calendar month={month} bookings={bookings} onSelect={date => { setSelected(date); setError(''); setNotice(''); }} />}
     <p className="instruction">Para anotarte, tocá un casillero blanco.<br/>Si necesitás modificar o cancelar una fecha, comunicate con el administrador.</p>
     {selected && <Dialog title={`Anotarse para el ${longDate(selected)}`} onClose={() => { setSelected(null); setError(''); }}><form onSubmit={submit}><label htmlFor="booking-name">Nombre o familia</label><input id="booking-name" autoFocus required minLength={2} maxLength={100} value={name} onChange={e => setName(e.target.value)}/>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={submitting || name.trim().length < 2}>{submitting ? 'Anotando…' : 'Anotarme'}</button></form></Dialog>}
   </main>;
 }
 
 function AdminPage() {
+  const [published, setPublished] = useState(null), [publishing, setPublishing] = useState(false);
   const [authenticated, setAuthenticated] = useState(null), [password, setPassword] = useState(''), [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
   const [bookings, setBookings] = useState([]), [all, setAll] = useState([]), [blocks, setBlocks] = useState([]), [editing, setEditing] = useState(null), [blocking, setBlocking] = useState(false), [name, setName] = useState(''), [date, setDate] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false);
   const refresh = useCallback(async () => {
     try {
-      const [monthData, allData, blockedData] = await Promise.all([api(`/api/inscripciones?year=${month.getFullYear()}&month=${month.getMonth() + 1}`), api('/api/admin/inscripciones'), api('/api/admin/bloqueos')]);
+      const [monthData, allData, blockedData] = await Promise.all([api(`/api/admin/calendario?year=${month.getFullYear()}&month=${month.getMonth() + 1}`), api('/api/admin/inscripciones'), api('/api/admin/bloqueos')]);
       setBookings(monthData); setAll(allData); setBlocks(blockedData); setError('');
     } catch (e) { setError(e.message); if (e.status === 401) setAuthenticated(false); }
   }, [month]);
   useEffect(() => { api('/api/admin/session').then(() => setAuthenticated(true)).catch(() => setAuthenticated(false)); }, []);
   useEffect(() => { if (authenticated) refresh(); }, [authenticated, refresh]);
+  useEffect(() => {
+    if (authenticated) api('/api/calendario').then(data => { setPublished(calendarMonth(data)); setMonth(calendarMonth(data)); }).catch(e => setError(e.message));
+  }, [authenticated]);
+  const publish = async e => {
+    e.preventDefault(); setPublishing(true); setError('');
+    try {
+      const data = await api('/api/admin/mes-publico', { method: 'PUT', body: JSON.stringify({ year: month.getFullYear(), month: month.getMonth() + 1 }) });
+      setPublished(calendarMonth(data)); setNotice(`Ahora el público ve ${monthTitle(calendarMonth(data))}.`);
+    } catch (e) { setError(e.message); } finally { setPublishing(false); }
+  };
   const login = async e => { e.preventDefault(); setBusy(true); try { await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ password }) }); setPassword(''); setError(''); setAuthenticated(true); } catch (e) { setError(e.message); } finally { setBusy(false); } };
   const logout = async () => { await api('/api/admin/logout', { method: 'POST' }); setAuthenticated(false); setAll([]); };
-  const open = (item, chosenDate) => { setEditing(item || { id: null }); setDate(chosenDate || item?.fecha || localToday()); setName(item?.nombre || ''); setError(''); setNotice(''); };
-  const openBlock = () => { setDate(localToday()); setBlocking(true); setError(''); setNotice(''); };
+  const defaultDate = () => { const first = `${monthValue(month)}-01`; return first > localToday() ? first : localToday(); };
+  const open = (item, chosenDate) => { setEditing(item || { id: null }); setDate(chosenDate || item?.fecha || defaultDate()); setName(item?.nombre || ''); setError(''); setNotice(''); };
+  const openBlock = () => { setDate(defaultDate()); setBlocking(true); setError(''); setNotice(''); };
   const save = async e => {
     e.preventDefault(); setBusy(true);
     try { await api(editing.id ? `/api/admin/inscripciones/${editing.id}` : '/api/admin/inscripciones', { method: editing.id ? 'PATCH' : 'POST', body: JSON.stringify({ fecha: date, nombre: name }) }); setEditing(null); setNotice('Inscripción guardada.'); await refresh(); }
@@ -114,14 +132,14 @@ function AdminPage() {
   };
   if (authenticated === null) return <main className="shell"><p className="loading">Cargando…</p></main>;
   if (!authenticated) return <main className="shell"><header className="topline"><a href="/">← Calendario</a></header><section className="login-card"><h1>Administración</h1><p>Ingresá tu contraseña para gestionar las inscripciones.</p><form onSubmit={login}><label htmlFor="password">Contraseña</label><input id="password" type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)}/>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={busy}>Ingresar</button></form></section></main>;
-  const { end } = activeRange();
   return <main className="shell"><header className="topline"><a href="/">← Calendario público</a><button className="text-button" onClick={logout}>Cerrar sesión</button></header><div className="admin-heading"><span className="eyebrow">Administración</span><div className="admin-actions"><button className="secondary small" onClick={openBlock}>Bloquear día</button><button className="primary small" onClick={() => open(null)}>+ Agregar</button></div></div><MonthNavigation month={month} setMonth={setMonth}/>
+    <form className="publish-month" onSubmit={publish}><div><label htmlFor="public-month">Mes para mostrar al público</label><input id="public-month" type="month" required min="1900-01" max="2100-12" value={monthValue(month)} onChange={e => { if (/^\d{4}-\d{2}$/.test(e.target.value)) { const [year, index] = e.target.value.split('-').map(Number); setMonth(new Date(year, index - 1, 1)); } }}/></div><button className="primary small" disabled={publishing || !published || monthValue(month) === monthValue(published)}>{publishing ? 'Publicando…' : 'Publicar mes'}</button><p>{published ? `Mes publicado: ${monthTitle(published)}. Los visitantes solo ven ese mes.` : 'Consultando el mes publicado…'} Cambiar la vista no lo publica hasta que presiones el botón.</p></form>
     {notice && <div className="notice success" role="status">{notice}</div>}{error && !editing && !blocking && <div className="notice error" role="alert">{error}</div>}
     <Calendar month={month} bookings={bookings} admin onSelect={d => open(null, d)} onOccupied={open} onBlocked={unblock}/>
     <section className="entries"><h2>Todas las inscripciones <span>{all.length}</span></h2>{all.length === 0 ? <p>Aún no hay inscripciones.</p> : <ul>{all.map(item => <li key={item.id}><div><strong>{item.nombre}</strong><small>{longDate(item.fecha)}</small></div><div className="entry-actions"><button onClick={() => open(item)}>Editar / mover</button><button className="danger" onClick={() => remove(item)}>Eliminar</button></div></li>)}</ul>}</section>
     <section className="entries blocked-list"><h2>Días bloqueados <span>{blocks.length}</span></h2>{blocks.length === 0 ? <p>No hay días bloqueados.</p> : <ul>{blocks.map(item => <li key={item.id}><div><strong>{longDate(item.fecha)}</strong></div><div className="entry-actions"><button onClick={() => unblock(item)}>Habilitar</button></div></li>)}</ul>}</section>
-    {editing && <Dialog title={editing.id ? 'Editar inscripción' : 'Agregar inscripción'} onClose={() => { setEditing(null); setError(''); }}><form onSubmit={save}><label htmlFor="admin-date">Fecha</label><input id="admin-date" type="date" required min={localToday()} max={isoDate(end.getFullYear(), end.getMonth(), end.getDate())} value={date} onChange={e => setDate(e.target.value)}/><label htmlFor="admin-name">Nombre o familia</label><input id="admin-name" autoFocus required minLength={2} maxLength={100} value={name} onChange={e => setName(e.target.value)}/>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={busy}>{busy ? 'Guardando…' : 'Guardar'}</button></form></Dialog>}
-    {blocking && <Dialog title="Bloquear día" onClose={() => { setBlocking(false); setError(''); }}><form onSubmit={saveBlock}><label htmlFor="block-date">Fecha</label><input id="block-date" type="date" autoFocus required min={localToday()} max={isoDate(end.getFullYear(), end.getMonth(), end.getDate())} value={date} onChange={e => setDate(e.target.value)}/><p className="form-hint">El casillero quedará gris y nadie podrá anotarse hasta que lo habilites nuevamente.</p>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={busy}>{busy ? 'Bloqueando…' : 'Bloquear día'}</button></form></Dialog>}
+    {editing && <Dialog title={editing.id ? 'Editar inscripción' : 'Agregar inscripción'} onClose={() => { setEditing(null); setError(''); }}><form onSubmit={save}><label htmlFor="admin-date">Fecha</label><input id="admin-date" type="date" required min={localToday()} max="2100-12-31" value={date} onChange={e => setDate(e.target.value)}/><label htmlFor="admin-name">Nombre o familia</label><input id="admin-name" autoFocus required minLength={2} maxLength={100} value={name} onChange={e => setName(e.target.value)}/>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={busy}>{busy ? 'Guardando…' : 'Guardar'}</button></form></Dialog>}
+    {blocking && <Dialog title="Bloquear día" onClose={() => { setBlocking(false); setError(''); }}><form onSubmit={saveBlock}><label htmlFor="block-date">Fecha</label><input id="block-date" type="date" autoFocus required min={localToday()} max="2100-12-31" value={date} onChange={e => setDate(e.target.value)}/><p className="form-hint">El casillero quedará gris y nadie podrá anotarse hasta que lo habilites nuevamente.</p>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary" disabled={busy}>{busy ? 'Bloqueando…' : 'Bloquear día'}</button></form></Dialog>}
   </main>;
 }
 

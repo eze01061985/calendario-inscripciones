@@ -4,8 +4,8 @@ import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { HttpError, validName, validActiveDate, validMonth } from './validation.js';
-import { listMonth, createBooking, updateBooking, blockDay } from './db.js';
+import { HttpError, validName, validDate, validMonth } from './validation.js';
+import { listMonth, createBooking, createPublicBooking, updateBooking, blockDay, publishedMonth, publishMonth } from './db.js';
 
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 const idOf = value => {
@@ -21,6 +21,7 @@ export function createApp({ pool, passwordHash, sessionSecret, production = fals
   app.use(helmet({ contentSecurityPolicy: production ? undefined : false }));
   app.use(express.json({ limit: '10kb' }));
   app.use(cookieParser());
+  app.use('/api', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   const cookie = { httpOnly: true, secure: production, sameSite: 'strict', path: '/api/admin', maxAge: 8 * 60 * 60 * 1000 };
   const limited = (max) => rateLimit({ windowMs: 15 * 60 * 1000, limit: max, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Demasiados intentos. Probá de nuevo en unos minutos.' } });
   const requireAdmin = (req, _res, next) => {
@@ -35,18 +36,20 @@ export function createApp({ pool, passwordHash, sessionSecret, production = fals
   };
 
   app.get('/api/health', asyncRoute(async (_req, res) => { await pool.query('SELECT 1'); res.json({ status: 'ok' }); }));
+  app.get('/api/calendario', asyncRoute(async (_req, res) => {
+    const { year, month } = await publishedMonth(pool);
+    res.json({ year, month, inscripciones: await listMonth(pool, year, month) });
+  }));
   app.get('/api/inscripciones', asyncRoute(async (req, res) => {
     const { year, month } = validMonth(req.query.year, req.query.month);
-    const now = today();
-    const current = now.getFullYear() * 12 + now.getMonth();
-    const requested = year * 12 + month - 1;
-    if (requested < current || requested > current + 1) throw new HttpError(400, 'Solo están disponibles el mes actual y el siguiente.');
+    const visible = await publishedMonth(pool);
+    if (year !== visible.year || month !== visible.month) throw new HttpError(400, 'Ese mes no está publicado.');
     res.json(await listMonth(pool, year, month));
   }));
   app.post('/api/inscripciones', sameOrigin, limited(20), asyncRoute(async (req, res) => {
-    const fecha = validActiveDate(req.body?.fecha, { today: today() });
+    const fecha = validDate(req.body?.fecha, { today: today() });
     const nombre = validName(req.body?.nombre);
-    res.status(201).json(await createBooking(pool, fecha, nombre));
+    res.status(201).json(await createPublicBooking(pool, fecha, nombre));
   }));
   app.post('/api/admin/login', sameOrigin, limited(5), asyncRoute(async (req, res) => {
     const candidate = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -56,16 +59,24 @@ export function createApp({ pool, passwordHash, sessionSecret, production = fals
   }));
   app.get('/api/admin/session', requireAdmin, (_req, res) => res.json({ authenticated: true }));
   app.post('/api/admin/logout', sameOrigin, requireAdmin, (_req, res) => { res.clearCookie('admin_session', cookie); res.json({ authenticated: false }); });
+  app.get('/api/admin/calendario', requireAdmin, asyncRoute(async (req, res) => {
+    const { year, month } = validMonth(req.query.year, req.query.month);
+    res.json(await listMonth(pool, year, month));
+  }));
+  app.put('/api/admin/mes-publico', sameOrigin, requireAdmin, asyncRoute(async (req, res) => {
+    const { year, month } = validMonth(req.body?.year, req.body?.month);
+    res.json(await publishMonth(pool, year, month));
+  }));
   app.use('/api/admin/inscripciones', sameOrigin, requireAdmin);
   app.get('/api/admin/inscripciones', asyncRoute(async (_req, res) => {
     const [rows] = await pool.execute('SELECT id, fecha, nombre, creado_en, actualizado_en FROM inscripciones WHERE bloqueado = 0 ORDER BY fecha DESC');
     res.json(rows);
   }));
   app.post('/api/admin/inscripciones', asyncRoute(async (req, res) => {
-    res.status(201).json(await createBooking(pool, validActiveDate(req.body?.fecha, { today: today() }), validName(req.body?.nombre)));
+    res.status(201).json(await createBooking(pool, validDate(req.body?.fecha, { today: today() }), validName(req.body?.nombre)));
   }));
   app.patch('/api/admin/inscripciones/:id', asyncRoute(async (req, res) => {
-    const updated = await updateBooking(pool, idOf(req.params.id), validActiveDate(req.body?.fecha, { today: today() }), validName(req.body?.nombre));
+    const updated = await updateBooking(pool, idOf(req.params.id), validDate(req.body?.fecha, { today: today() }), validName(req.body?.nombre));
     if (!updated) throw new HttpError(404, 'Inscripción no encontrada.');
     res.json(updated);
   }));
@@ -80,7 +91,7 @@ export function createApp({ pool, passwordHash, sessionSecret, production = fals
     res.json(rows);
   }));
   app.post('/api/admin/bloqueos', asyncRoute(async (req, res) => {
-    res.status(201).json(await blockDay(pool, validActiveDate(req.body?.fecha, { today: today() })));
+    res.status(201).json(await blockDay(pool, validDate(req.body?.fecha, { today: today() })));
   }));
   app.delete('/api/admin/bloqueos/:id', asyncRoute(async (req, res) => {
     const [result] = await pool.execute('DELETE FROM inscripciones WHERE id = ? AND bloqueado = 1', [idOf(req.params.id)]);

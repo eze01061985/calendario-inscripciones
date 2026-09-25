@@ -2,14 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcryptjs';
 import { createApp } from '../src/app.js';
-import { validDate, validActiveDate, validName } from '../src/validation.js';
+import { validDate, validName } from '../src/validation.js';
 
 function fakePool() {
   const rows = []; let nextId = 1;
+  let publicMonth = '2026-10-01';
   return {
     rows,
+    async getConnection() { return { execute: this.execute.bind(this), async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} }; },
     async query() { return [[{ ok: 1 }]]; },
     async execute(sql, values = []) {
+      if (sql.startsWith('SELECT mes FROM configuracion_calendario')) return [[{ mes: publicMonth }]];
+      if (sql.startsWith('UPDATE configuracion_calendario')) { publicMonth = values[0]; return [{ affectedRows: 1 }]; }
       if (sql.startsWith('SELECT')) {
         if (sql.includes('WHERE fecha')) return [rows.filter(r => r.fecha >= values[0] && r.fecha < values[1]).sort((a,b) => a.fecha.localeCompare(b.fecha))];
         if (sql.includes('WHERE bloqueado = 0')) return [rows.filter(r => !r.bloqueado).sort((a,b) => b.fecha.localeCompare(a.fecha))];
@@ -44,9 +48,7 @@ test('validation rejects malformed and past dates, trims names', () => {
   assert.equal(validName('<script>alert(1)</script>'), '<script>alert(1)</script>'); // React renders this as text, not HTML.
   assert.throws(() => validDate('2026-02-30', { today: new Date('2026-01-01') }), /fecha válida/);
   assert.throws(() => validDate('2026-09-21', { today: new Date('2026-09-22T12:00:00') }), /pasada/);
-  assert.equal(validActiveDate('2026-10-31', { today: new Date('2026-09-22T12:00:00') }), '2026-10-31');
-  assert.throws(() => validActiveDate('2026-11-01', { today: new Date('2026-09-22T12:00:00') }), /mes actual/i);
-  assert.equal(validActiveDate('2027-01-02', { today: new Date('2026-12-20T12:00:00') }), '2027-01-02');
+  assert.equal(validDate('2027-01-02', { today: new Date('2026-12-20T12:00:00') }), '2027-01-02');
 });
 
 test('public and admin flows enforce unique dates and authorization', async () => {
@@ -80,7 +82,7 @@ test('public and admin flows enforce unique dates and authorization', async () =
     assert.equal((await call('/api/admin/inscripciones/3', 'PATCH', { fecha: '2026-10-08', nombre: 'Familia Gómez' }, cookie)).status, 409);
     assert.equal((await call('/api/admin/inscripciones/3', 'PATCH', { fecha: '2026-10-13', nombre: 'Familia Pérez' }, cookie)).status, 200);
     assert.equal((await call('/api/admin/inscripciones/3', 'DELETE', null, cookie)).status, 204);
-    assert.equal((await call('/api/admin/bloqueos', 'POST', { fecha: '2026-11-01' }, cookie)).status, 400);
+    assert.equal((await call('/api/admin/bloqueos', 'POST', { fecha: '2026-09-01' }, cookie)).status, 400);
     assert.equal((await call('/api/admin/bloqueos', 'POST', { fecha: '2026-10-08' }, cookie)).status, 409);
     const block = await call('/api/admin/bloqueos', 'POST', { fecha: '2026-10-15' }, cookie);
     assert.equal(block.status, 201);
@@ -130,5 +132,48 @@ test('a block and a public booking cannot claim the same day', async () => {
     ]);
     assert.deepEqual(results.map(r => r.status).sort(), [201, 409]);
     assert.equal(pool.rows.length, 1);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('only the published month is public; administrators can prepare and publish another year without losing data', async () => {
+  const pool = fakePool();
+  const options = { pool, passwordHash: await bcrypt.hash('test-password', 4), sessionSecret: 'test-secret-with-more-than-32-characters', today: () => new Date('2026-09-25T12:00:00') };
+  const server = createApp(options).listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (path, method = 'GET', body, cookie) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  try {
+    const initial = await (await call('/api/calendario')).json();
+    assert.equal(initial.month, 10);
+    const setting = { year: 2027, month: 1 };
+    assert.equal((await call('/api/admin/mes-publico', 'PUT', setting)).status, 401);
+    assert.equal((await call('/api/admin/calendario?year=2027&month=1')).status, 401);
+    const login = await call('/api/admin/login', 'POST', { password: 'test-password' });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    assert.equal((await call('/api/admin/mes-publico', 'PUT', { year: 2027, month: 13 }, cookie)).status, 400);
+    const oldBooking = { fecha: '2026-10-20', nombre: 'Familia de octubre' };
+    assert.equal((await call('/api/inscripciones', 'POST', oldBooking)).status, 201);
+    assert.equal((await call('/api/admin/inscripciones', 'POST', { fecha: '2027-01-05', nombre: 'Familia de enero' }, cookie)).status, 201);
+    assert.equal((await call('/api/admin/bloqueos', 'POST', { fecha: '2027-01-06' }, cookie)).status, 201);
+    assert.equal((await call('/api/admin/calendario?year=2027&month=1', 'GET', null, cookie)).status, 200);
+    assert.equal((await call('/api/inscripciones?year=2027&month=1')).status, 400);
+    assert.equal((await call('/api/admin/mes-publico', 'PUT', setting, cookie)).status, 200);
+    const current = await (await call('/api/calendario')).json();
+    assert.equal(current.year, 2027);
+    assert.equal(current.month, 1);
+    assert.equal(current.inscripciones.length, 2);
+    assert.equal(current.inscripciones.find(item => item.fecha === '2027-01-06').bloqueado, 1);
+    assert.equal((await call('/api/inscripciones', 'POST', { ...oldBooking, fecha: '2026-10-21' })).status, 400);
+    assert.equal((await call('/api/inscripciones', 'POST', { ...oldBooking, fecha: '2027-01-10' })).status, 201);
+    // A new application instance reads the same saved setting.
+    const restarted = createApp(options).listen(0);
+    await new Promise(resolve => restarted.once('listening', resolve));
+    try {
+      const saved = await (await fetch(`http://127.0.0.1:${restarted.address().port}/api/calendario`)).json();
+      assert.equal(saved.year, 2027); assert.equal(saved.month, 1);
+    } finally { await new Promise(resolve => restarted.close(resolve)); }
+    await call('/api/admin/mes-publico', 'PUT', { year: 2026, month: 10 }, cookie);
+    assert.equal((await (await call('/api/calendario')).json()).inscripciones[0].nombre, oldBooking.nombre);
+    assert.equal(pool.rows.length, 4);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

@@ -1,4 +1,5 @@
 import mysql from 'mysql2/promise';
+import { HttpError } from './validation.js';
 
 export function createPool(url) {
   if (!url) throw new Error('Falta DATABASE_URL');
@@ -15,6 +16,40 @@ export async function migrate(pool) {
     const upgrade = await readFile(new URL('../migrations/002_blocked_days.sql', import.meta.url), 'utf8');
     await pool.query(upgrade);
   }
+  await pool.query(await readFile(new URL('../migrations/003_public_month.sql', import.meta.url), 'utf8'));
+  const now = new Date();
+  const initialMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  await pool.execute('INSERT IGNORE INTO configuracion_calendario (id, mes) VALUES (1, ?)', [initialMonth]);
+}
+
+export async function publishedMonth(database, lock = false) {
+  const [rows] = await database.execute(`SELECT mes FROM configuracion_calendario WHERE id = 1${lock ? ' FOR UPDATE' : ''}`);
+  if (!rows.length) throw new Error('Falta la configuración del calendario.');
+  const [year, month] = rows[0].mes.split('-').map(Number);
+  return { year, month };
+}
+
+export async function publishMonth(pool, year, month) {
+  await pool.execute('UPDATE configuracion_calendario SET mes = ? WHERE id = 1', [`${year}-${String(month).padStart(2, '0')}-01`]);
+  return { year, month };
+}
+
+export async function createPublicBooking(pool, fecha, nombre) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    // Serialize publication changes with public bookings, including requests from an old open tab.
+    const { year, month } = await publishedMonth(connection, true);
+    if (!fecha.startsWith(`${year}-${String(month).padStart(2, '0')}-`)) {
+      throw new HttpError(400, 'El administrador cambió el mes disponible. Revisá el calendario e intentá nuevamente.');
+    }
+    const booking = await createBooking(connection, fecha, nombre);
+    await connection.commit();
+    return booking;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally { connection.release(); }
 }
 
 export async function listMonth(pool, year, month) {

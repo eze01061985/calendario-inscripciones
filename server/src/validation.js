@@ -25,16 +25,6 @@ export function validDate(value, { allowPast = false, today = new Date() } = {})
   return value;
 }
 
-export function validActiveDate(value, { today = new Date() } = {}) {
-  const date = validDate(value, { today });
-  const firstMonth = today.getFullYear() * 12 + today.getMonth();
-  const [year, month] = date.split('-').map(Number);
-  if (year * 12 + month - 1 > firstMonth + 1) {
-    throw new HttpError(400, 'Solo se puede elegir una fecha del mes actual o del siguiente.');
-  }
-  return date;
-}
-
 export function validMonth(year, month) {
   const y = Number(year), m = Number(month);
   if (!/^\d{4}$/.test(String(year)) || !/^\d{1,2}$/.test(String(month)) || y < 1900 || y > 2100 || m < 1 || m > 12) {
